@@ -9,7 +9,7 @@ let browserIDs: Set<String> = [
     "company.thebrowser.Browser", "com.operasoftware.Opera",
     "com.vivaldi.Vivaldi", "app.zen-browser.zen",
 ]
-let thresholdSeconds = 10  // 5 minutes
+let thresholdSeconds = 300  // 5 minutes
 
 // Window that can take focus without a title bar close button, and ignores Esc.
 final class PromptWindow: NSWindow {
@@ -24,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     var submit = NSButton()
     var browserSeconds = 0
     var prompting = false
+    var didItControl: NSSegmentedControl?
     var statusItem: NSStatusItem!
     var enabled = true
     var pausedUntil: Date?
@@ -142,12 +143,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
         let title = NSTextField(labelWithString: "You've been in the browser for 5 minutes.")
         title.font = .systemFont(ofSize: 16, weight: .semibold)
 
-        let stack = NSStackView(views: [
-            title,
+        didItControl = nil
+        var views: [NSView] = [title]
+        let defaults = UserDefaults.standard
+        if let lastTask = defaults.string(forKey: "lastTask"),
+           let lastStep = defaults.string(forKey: "lastStep") {
+            var when = ""
+            if let d = defaults.object(forKey: "lastDate") as? Date {
+                when = " (" + RelativeDateTimeFormatter().localizedString(for: d, relativeTo: Date()) + ")"
+            }
+            let last = NSTextField(wrappingLabelWithString:
+                "Last time\(when):\nTask: \(lastTask)\nNext step: \(lastStep)")
+            last.textColor = .secondaryLabelColor
+            last.preferredMaxLayoutWidth = 400
+            last.widthAnchor.constraint(equalToConstant: 400).isActive = true
+            views.append(last)
+
+            let control = NSSegmentedControl(labels: ["Yes", "Partly", "No"],
+                                             trackingMode: .selectOne,
+                                             target: self,
+                                             action: #selector(didItChanged))
+            control.selectedSegment = -1  // nothing selected until you choose
+            didItControl = control
+            views += [label("Did you do that next step?"), control]
+        }
+        views += [
             label("What task will you work on next?"), taskField,
             label("What is your very next step?"), stepField,
             submit,
-        ])
+        ]
+        let stack = NSStackView(views: views)
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 10
@@ -170,7 +195,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     }
 
     func controlTextDidChange(_ obj: Notification) {
-        submit.isEnabled = !trimmed(taskField).isEmpty && !trimmed(stepField).isEmpty
+        refreshSubmit()
+    }
+
+    @objc func didItChanged() {
+        refreshSubmit()
+    }
+
+    func refreshSubmit() {
+        let fieldsFilled = !trimmed(taskField).isEmpty && !trimmed(stepField).isEmpty
+        let answered = didItControl == nil || (didItControl?.selectedSegment ?? -1) >= 0
+        submit.isEnabled = fieldsFilled && answered
     }
 
     func trimmed(_ f: NSTextField) -> String {
@@ -180,16 +215,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSTextFieldDelegate {
     @objc func done() {
         let task = trimmed(taskField), step = trimmed(stepField)
         guard !task.isEmpty, !step.isEmpty else { return }
-        log(task: task, step: step)
+        var didLast: String? = nil
+        if let c = didItControl {
+            guard c.selectedSegment >= 0 else { return }
+            didLast = c.label(forSegment: c.selectedSegment)
+        }
+        log(task: task, step: step, didLast: didLast)
+        let defaults = UserDefaults.standard
+        defaults.set(task, forKey: "lastTask")
+        defaults.set(step, forKey: "lastStep")
+        defaults.set(Date(), forKey: "lastDate")
         window?.orderOut(nil)
         window = nil
         prompting = false
         browserSeconds = 0
     }
 
-    func log(task: String, step: String) {
+    func log(task: String, step: String, didLast: String?) {
         let path = NSHomeDirectory() + "/focus-log.txt"
-        let line = "\(ISO8601DateFormatter().string(from: Date()))\ttask: \(task)\tnext: \(step)\n"
+        let prev = didLast.map { "\tdid-last: \($0)" } ?? ""
+        let line = "\(ISO8601DateFormatter().string(from: Date()))\(prev)\ttask: \(task)\tnext: \(step)\n"
         if let h = FileHandle(forWritingAtPath: path) {
             h.seekToEndOfFile()
             h.write(line.data(using: .utf8)!)
